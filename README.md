@@ -1,6 +1,8 @@
 # Multifamily Operations Intelligence
 
-**Independent portfolio prototype · synthetic data.** Not a product of, affiliated with, or connected to any property-management company or software vendor. Every property, resident, identifier and comment is fictional.
+**Live demo:** https://multifamily-ops-copilot.vercel.app · **Source:** https://github.com/neilsahai/multifamily-ops-copilot
+
+**Independent portfolio prototype · synthetic data.** Built independently as a portfolio project. It is **not affiliated with, endorsed by, or connected to Venn** or any other property-management company or software vendor, and it uses no real operator data or systems. Every property, resident, identifier and comment is fictional.
 
 ## In 30 seconds
 
@@ -139,9 +141,17 @@ src/components/CopilotPanel.tsx
 
 The loop is written by hand rather than with the SDK's beta tool runner. That keeps every tool call visible for grounding and lets the tests drive it with a scripted fake model. The loop is bounded:
 - at most 6 tool rounds and 16,000 output tokens per request
-- a 55-second timeout with 1 retry
+- a 55-second timeout per model request with 1 retry, and a 100-second deadline for the whole question. The route's `maxDuration` is 120 seconds; Vercel Hobby allows up to 300.
 - questions of at most 500 characters
-- per-IP limit of 20 live questions per 10 minutes, with identical questions cached for an hour. Both are held in memory on each server instance, which bounds a public demo's spend but is not a quota system.
+
+### Spending controls for the public demo
+
+Live questions cost real money, so the public deployment limits spend in three layers:
+1. **Shared request budget** (`src/lib/copilot/budget.ts`). Every live question first does an atomic `INCR` in a shared Redis store (Upstash for Redis, attached through the Vercel Marketplace). All server instances share the same counters. The defaults are **60 live questions per day** overall and **8 per hour per visitor**; visitor IPs are stored only as hashes. Both caps are configurable with `COPILOT_DAILY_LIVE_LIMIT` and `COPILOT_CLIENT_HOURLY_LIMIT`. Worst-case daily spend is therefore about the daily cap times the cost of one question, which is at most 6 tool rounds.
+2. **Fail closed.** On Vercel (`VERCEL=1`), if the store is missing or unreachable, live mode is off and the labeled fallback answers instead. Local development without a store falls back to a per-instance limiter.
+3. **Shared answer cache.** Identical questions (e.g. the presets) are served from Redis for 24 hours without calling the model or using the budget. A per-instance in-memory limit (20 per 10 minutes per visitor) runs in front of all of this.
+
+For a hard dollar ceiling at the provider, also set a monthly spend limit on the Anthropic workspace that owns the key (Anthropic Console → Settings → Workspaces → Limits).
 
 ### Tools
 
@@ -206,7 +216,7 @@ cp .env.example .env.local
 npm run dev
 ```
 
-Without `LLM_API_KEY` the panel shows **Deterministic fallback · LLM_API_KEY not set**, and everything else works unchanged. On Vercel, add the same two variables under Project → Settings → Environment Variables. They are server-only and must not be prefixed `NEXT_PUBLIC_`.
+Without `LLM_API_KEY` the panel shows **Deterministic fallback mode** with the reason, and everything else works unchanged. Locally, the shared budget store is optional. On Vercel it is required for live mode (see [Spending controls](#spending-controls-for-the-public-demo)). All of these variables are server-only and must not be prefixed `NEXT_PUBLIC_`.
 
 ### Example
 
@@ -317,26 +327,40 @@ Requires Node ≥ 20.9 (tested on 22.11). No environment variables are needed fo
 ```bash
 npm install
 npm run dev        # http://localhost:3000
-npm test           # vitest (68 tests): date boundaries, as-of semantics, metrics, flag rule, evidence
+npm test           # vitest (77 tests): date boundaries, as-of semantics, metrics, flag rule, evidence
                    # provenance and narrative gating, drafts, task save/reset, stored-state validation,
-                   # copilot loop, grounding, read-only guarantees and fallback
+                   # copilot loop, grounding, read-only guarantees, fallback, shared budget and deadline
 npm run lint
 npm run typecheck
 npm run build && npm start
 ```
 
-### Deploying to Vercel
+### Deployment (Vercel)
 
-This app has not been deployed. To deploy it:
+Deployed at **https://multifamily-ops-copilot.vercel.app** on Vercel (Hobby plan, Next.js preset, default build settings). The production URL is public; no Vercel login is needed.
+
+Production environment variables (all server-only; `LLM_API_KEY` is marked Sensitive):
+
+| Variable | Purpose |
+|---|---|
+| `LLM_API_KEY` | Anthropic API key for live copilot mode |
+| `LLM_MODEL` | `claude-opus-5`, the model used in live testing |
+| `KV_REST_API_URL`, `KV_REST_API_TOKEN` | Shared request budget and answer cache (Upstash for Redis via Vercel Marketplace; set automatically) |
+| `COPILOT_DAILY_LIVE_LIMIT`, `COPILOT_CLIENT_HOURLY_LIMIT` | Optional overrides for the caps (defaults 60/day, 8/hour per visitor) |
+
+To deploy your own copy:
 
 ```bash
 npm i -g vercel
 vercel login
-vercel          # preview; accept the detected Next.js settings
-vercel --prod
+vercel link                                   # create/link a project
+vercel env add LLM_API_KEY production --sensitive
+vercel env add LLM_MODEL production           # claude-opus-5
+# Attach "Upstash for Redis" to the project in the Vercel dashboard (Storage tab)
+vercel deploy --prod
 ```
 
-Settings: Framework preset **Next.js**, build command `next build`, output directory is the default. Environment variables are optional: `LLM_API_KEY` and `LLM_MODEL` enable live copilot mode, and without them the copilot uses its labeled fallback. Alternatively, push to GitHub and import the repo in the Vercel dashboard.
+Without the key, or without the budget store on Vercel, the site still works fully and the copilot runs its labeled deterministic fallback.
 
 ## Implemented vs. future
 
@@ -349,7 +373,7 @@ The measurement plan's "issues resolved before renewal decision" row reads **Not
 - Auth, roles, and audit trail for approvals
 - Writing approved tasks back to a work-order system, and sending messages through approved channels
 - Outcome tracking against real renewal decisions
-- Copilot follow-ups: multi-turn conversation, streaming responses, a shared rate limit and cache (e.g. a hosted key-value store) instead of per-instance memory, and an eval set of questions with graded answers, to measure grounding quality before relying on live answers.
+- Copilot follow-ups: multi-turn conversation, streaming responses (live answers take about 20–40 seconds), and an eval set of questions with graded answers, to measure grounding quality over time.
 
 ## Integrating with a real operator data stack
 
@@ -371,5 +395,8 @@ The measurement plan's "issues resolved before renewal decision" row reads **Not
 - Leases are the renewal-cycle cohort only. Occupancy comes from property-level unit counts.
 - The groups behind "renewals by maintenance history" are tiny (n = 5 and 3). The app says so and never presents the gap as proof.
 - Demo state is per-browser `localStorage`; clearing site data also resets it.
+- Live copilot answers take about 20–40 seconds and are capped at 60 per day across all visitors (repeated questions are cached). Once the cap is reached, the copilot switches to its labeled fallback until the next UTC day.
+- The copilot is a single-turn question panel, not a conversation, and its answer quality has been spot-checked by hand, not measured with an eval set.
+- The model can only suggest drafts. Tasks and outreach remain simulated and live only in the visitor's browser.
 
 See [`docs/product-memo.md`](docs/product-memo.md) for the product framing.

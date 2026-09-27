@@ -1,0 +1,10 @@
+# Never upload local secrets, internal documents or local build output.
+.env
+.env.*
+!.env.example
+venn_fde_micro_mvp_build_spec.md
+real_estate_code_review.md
+node_modules
+.next
+*.tsbuildinfo
+.DS_Store
